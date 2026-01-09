@@ -340,6 +340,46 @@ def _unpack_model_outputs(outputs):
             return tr_pred, rot_pred, tor_pred, sidechain_pred, None
     raise ValueError("Unexpected model output format; expected 4 or 5 outputs.")
 
+
+def _count_nci_edge_stats(data):
+    graphs = data if isinstance(data, (list, tuple)) else [data]
+    nci_edge_type = ('ligand', 'nci_cand', 'receptor')
+    pos_count = 0
+    neg_count = 0
+    valid_count = 0
+    for g in graphs:
+        if nci_edge_type not in g.edge_types:
+            continue
+        edge = g[nci_edge_type]
+        if not hasattr(edge, 'edge_index') or edge.edge_index is None:
+            continue
+        edge_index = edge.edge_index
+        if edge_index.numel() == 0:
+            continue
+        num_lig = g['ligand'].num_nodes
+        num_rec = g['receptor'].num_nodes
+        valid_mask = (
+            (edge_index[0] >= 0)
+            & (edge_index[0] < num_lig)
+            & (edge_index[1] >= 0)
+            & (edge_index[1] < num_rec)
+        )
+        valid_count += int(valid_mask.sum().item())
+        labels = None
+        if hasattr(edge, 'edge_type_y') and edge.edge_type_y is not None:
+            if edge.edge_type_y.numel() == edge_index.size(1):
+                labels = edge.edge_type_y
+        if labels is not None and labels.numel() > 0:
+            valid_labels = labels[valid_mask]
+            pos_count += int((valid_labels > 0).sum().item())
+            neg_count += int((valid_labels == 0).sum().item())
+    return {
+        'pos': pos_count,
+        'neg': neg_count,
+        'valid': valid_count,
+    }
+
+
 def debug_nci_batch(data):
     # data 为 list[HeteroData]（cuda并行）或 HeteroData（cpu）
     graphs = data if isinstance(data, (list, tuple)) else [data]
@@ -405,20 +445,42 @@ class AverageMeter():
             return out
 
 
-def train_epoch(model, loader, optimizer, device, t_to_sigma, loss_fn, ema_weights):
+def train_epoch(model, loader, optimizer, device, t_to_sigma, loss_fn, ema_weights, nci_log_path=None, epoch_idx=None):
     model.train()
     meter = AverageMeter(['loss', 'tr_loss', 'rot_loss', 'tor_loss', 'backbone_loss', 'sidechain_loss',
                           'nci_loss', 'pos_recall', 'none_acc', 'tr_base_loss', 'rot_base_loss', 'tor_base_loss',
                           'backbone_base_loss', 'sidechain_base_loss'])
 
-    for data in tqdm(loader, total=len(loader)):
+    log_handle = None
+    if nci_log_path is not None:
+        log_handle = open(nci_log_path, 'a', encoding='utf-8')
+
+    for batch_idx, data in enumerate(tqdm(loader, total=len(loader))):
         if device.type == 'cuda' and len(data) == 1 or device.type == 'cpu' and data.num_graphs == 1:
             print("Skipping batch of size 1 since otherwise batchnorm would not work.")
             continue
         optimizer.zero_grad()
 
+        pre_stats = _count_nci_edge_stats(data)
         sanitize_nci_edges(data)
         debug_nci_batch(data)
+        post_stats = _count_nci_edge_stats(data)
+        if log_handle is not None:
+            epoch_value = epoch_idx if epoch_idx is not None else -1
+            log_handle.write(
+                "epoch={epoch} batch={batch} "
+                "pre_pos={pre_pos} pre_neg={pre_neg} pre_valid={pre_valid} "
+                "post_pos={post_pos} post_neg={post_neg} post_valid={post_valid}\n".format(
+                    epoch=epoch_value,
+                    batch=batch_idx,
+                    pre_pos=pre_stats['pos'],
+                    pre_neg=pre_stats['neg'],
+                    pre_valid=pre_stats['valid'],
+                    post_pos=post_stats['pos'],
+                    post_neg=post_stats['neg'],
+                    post_valid=post_stats['valid'],
+                )
+            )
 
         data = [d.to(device) for d in data] if device.type == 'cuda' else data
         try:
@@ -458,7 +520,10 @@ def train_epoch(model, loader, optimizer, device, t_to_sigma, loss_fn, ema_weigh
                 #raise e
                 print(e)
                 continue
-            
+
+    if log_handle is not None:
+        log_handle.close()
+
     return meter.summary()
 
 
