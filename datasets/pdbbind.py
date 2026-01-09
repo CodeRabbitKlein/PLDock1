@@ -925,19 +925,43 @@ def _plip_res_key(record):
     res_chain = record.get("RESCHAIN")
     res_nr = record.get("RESNR")
     res_name = record.get("RESNAME")
+    if res_name is None:
+        res_name = record.get("RESTYPE")
     res_icode_raw = record.get("RESICODE")
     if res_icode_raw is None:
         res_icode_raw = record.get("ICODE")
     res_icode = _normalize_plip_icode(res_icode_raw)
     if res_chain is None or res_nr is None:
-        return None, None, res_icode_raw
+        return None, None, None, res_icode_raw
     try:
         res_nr_value = int(res_nr)
     except (TypeError, ValueError):
         res_nr_value = res_nr
     res_chain_value = str(res_chain)
     res_name_value = str(res_name) if res_name is not None else ""
-    return (res_chain_value, res_nr_value, res_icode, res_name_value), (res_chain_value, res_nr_value), res_icode_raw
+    return (res_chain_value, res_nr_value, res_icode), (res_chain_value, res_nr_value), res_name_value, res_icode_raw
+
+
+def _extract_ligand_indices(record, num_atoms):
+    candidates = []
+    if "LIG_IDX_LIST" in record:
+        candidates.extend(parse_lig_idx_list(record.get("LIG_IDX_LIST"), num_atoms))
+    for key in ("LIGCARBONIDX", "DONORIDX", "ACCEPTORIDX"):
+        idx = record.get(key)
+        if idx is None:
+            continue
+        try:
+            idx_value = int(idx)
+        except (TypeError, ValueError):
+            continue
+        candidates.append(idx_value)
+    resolved = []
+    for idx in candidates:
+        if 0 <= idx < num_atoms:
+            resolved.append(idx)
+        elif 1 <= idx <= num_atoms:
+            resolved.append(idx - 1)
+    return sorted(set(resolved))
 
 
 def parse_plip_records(
@@ -982,7 +1006,7 @@ def parse_plip_records(
             for record in records:
                 total_records += 1
                 res_idx = None
-                res_key, fallback_key, raw_icode = _plip_res_key(record)
+                res_key, fallback_key, res_name_value, raw_icode = _plip_res_key(record)
                 if use_res_id and res_key_to_full_idx is not None:
                     if res_key is None:
                         filtered_records += 1
@@ -993,14 +1017,20 @@ def parse_plip_records(
                     res_idx = res_key_to_full_idx.get(res_key)
                     if res_idx is None and missing_icode and fallback_map is not None and fallback_key is not None:
                         candidates = fallback_map.get(fallback_key, [])
-                        if res_key[3]:
-                            candidates = [c for c in candidates if c[1] == res_key[3]]
+                        if res_name_value:
+                            candidates = [c for c in candidates if c[1] == res_name_value]
                         if len(candidates) == 1:
                             res_idx = candidates[0][0]
                             fallback_records += 1
                     if res_idx is None:
-                        filtered_records += 1
-                        continue
+                        prot_coord = record.get("PROTCOO")
+                        if prot_coord is None:
+                            filtered_records += 1
+                            continue
+                        if center is not None:
+                            prot_coord = np.asarray(prot_coord, dtype=np.float32) - center
+                        res_idx = int(res_tree.query(prot_coord, k=1)[1])
+                        fallback_records += 1
                 else:
                     prot_coord = record.get("PROTCOO")
                     if prot_coord is None:
@@ -1031,6 +1061,10 @@ def parse_plip_records(
                             lig_indices = None
 
                 if lig_indices is None:
+                    lig_indices = _extract_ligand_indices(record, lig_pos.shape[0])
+                    if not lig_indices:
+                        lig_indices = None
+                if lig_indices is None:
                     lig_coord = record.get("LIGCOO")
                     if lig_coord is None:
                         failed_records += 1
@@ -1039,6 +1073,8 @@ def parse_plip_records(
                         lig_coord = np.asarray(lig_coord, dtype=np.float32) - center
                     thresholds = PI_LIGAND_MATCH_THRESHOLDS if interaction_type in {"pistacking", "pication"} else (0.2, 0.4)
                     lig_idx, _ = map_ligand_coord(lig_tree, lig_coord, thresholds=thresholds)
+                    if lig_idx is None and interaction_type not in {"pistacking", "pication"}:
+                        lig_idx, _ = map_ligand_coord(lig_tree, lig_coord, thresholds=(0.5, 1.0))
                     if lig_idx is None:
                         failed_records += 1
                         continue
