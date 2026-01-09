@@ -1,4 +1,5 @@
 import copy
+import os
 import random
 
 import numpy as np
@@ -9,7 +10,7 @@ from torch_geometric.loader import DataLoader
 from utils.diffusion_utils import modify_conformer, set_time, modify_conformer_batch
 from utils.torsion import modify_conformer_torsion_angles
 from scipy.spatial.transform import Rotation as R
-from utils.utils import crop_beyond
+from utils.utils import crop_beyond, remap_edge_index, sanitize_nci_edges
 from utils.logging_utils import get_logger
 
 
@@ -106,9 +107,32 @@ def sampling(data_list, model, inference_steps, tr_schedule, rot_schedule, tor_s
                     mod_complex_graph_batch = copy.deepcopy(complex_graph_batch).to_data_list()
                     for batch in mod_complex_graph_batch:
                         crop_beyond(batch, tr_sigma * 3 + model_args.crop_beyond, model_args.all_atoms)
+                        nci_edge_type = ('ligand', 'nci_cand', 'receptor')
+                        if nci_edge_type in batch.edge_types:
+                            edge = batch[nci_edge_type]
+                            if hasattr(edge, 'edge_index') and edge.edge_index is not None:
+                                old_to_new = getattr(batch['receptor'], "old_to_new", None)
+                                if old_to_new is not None:
+                                    edge_index, valid_edges = remap_edge_index(edge.edge_index, old_to_new)
+                                    edge.edge_index = edge_index
+                                    if valid_edges is not None:
+                                        if hasattr(edge, 'edge_type_y') and edge.edge_type_y is not None:
+                                            if edge.edge_type_y.numel() == valid_edges.numel():
+                                                edge.edge_type_y = edge.edge_type_y[valid_edges]
+                                            else:
+                                                edge.edge_type_y = None
+                                        if hasattr(edge, 'edge_dist_y') and edge.edge_dist_y is not None:
+                                            if edge.edge_dist_y.numel() == valid_edges.numel():
+                                                edge.edge_dist_y = edge.edge_dist_y[valid_edges]
+                                            else:
+                                                edge.edge_dist_y = None
+                                if hasattr(batch['receptor'], "old_to_new"):
+                                    delattr(batch['receptor'], "old_to_new")
                     mod_complex_graph_batch = Batch.from_data_list(mod_complex_graph_batch)
                 else:
                     mod_complex_graph_batch = complex_graph_batch
+                debug_nci = os.getenv("NCI_DEBUG", "").lower() in {"1", "true", "yes"}
+                sanitize_nci_edges(mod_complex_graph_batch, debug=debug_nci, logger=logger)
 
                 set_time(mod_complex_graph_batch, t_schedule[t_idx] if t_schedule is not None else None, t_tr, t_rot, t_tor, b,
                          'all_atoms' in model_args and model_args.all_atoms, device)

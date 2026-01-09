@@ -430,3 +430,55 @@ def remap_edge_index(edge_index: Tensor, old_to_new: Tensor):
         return edge_index.new_empty((2, 0)), valid_edges
     edge_index = torch.stack([edge_index[0][valid_edges], remapped_rec[valid_edges]], dim=0)
     return edge_index, valid_edges
+
+
+def sanitize_nci_edges(data, debug=False, logger=None):
+    graphs = data if isinstance(data, (list, tuple)) else [data]
+    nci_edge_type = ('ligand', 'nci_cand', 'receptor')
+    for graph_idx, g in enumerate(graphs):
+        if nci_edge_type not in g.edge_types:
+            continue
+        edge = g[nci_edge_type]
+        if not hasattr(edge, 'edge_index') or edge.edge_index is None:
+            continue
+        edge_index = edge.edge_index
+        if edge_index.numel() == 0:
+            continue
+        num_lig = g['ligand'].num_nodes
+        num_rec = g['receptor'].num_nodes
+        valid_mask = (
+            (edge_index[0] >= 0)
+            & (edge_index[0] < num_lig)
+            & (edge_index[1] >= 0)
+            & (edge_index[1] < num_rec)
+        )
+        if debug and not torch.all(valid_mask):
+            bad_indices = (~valid_mask).nonzero(as_tuple=False).flatten().tolist()
+            message = (
+                f"NCI edge_index out of bounds in graph {graph_idx}: "
+                f"num_lig={num_lig} num_rec={num_rec} bad_edges={bad_indices[:20]}"
+            )
+            if logger is not None:
+                logger.warning(message)
+            else:
+                print(message)
+            raise AssertionError("Invalid NCI edge_index detected.")
+        if not torch.all(valid_mask):
+            edge_index = edge_index[:, valid_mask]
+            if hasattr(edge, 'edge_type_y') and edge.edge_type_y is not None:
+                if edge.edge_type_y.numel() == valid_mask.numel():
+                    edge.edge_type_y = edge.edge_type_y[valid_mask]
+                else:
+                    edge.edge_type_y = None
+            if hasattr(edge, 'edge_dist_y') and edge.edge_dist_y is not None:
+                if edge.edge_dist_y.numel() == valid_mask.numel():
+                    edge.edge_dist_y = edge.edge_dist_y[valid_mask]
+                else:
+                    edge.edge_dist_y = None
+        if edge_index.numel() == 0:
+            edge_index = edge_index.new_empty((2, 0))
+            if hasattr(edge, 'edge_type_y'):
+                edge.edge_type_y = None
+            if hasattr(edge, 'edge_dist_y'):
+                edge.edge_dist_y = None
+        edge.edge_index = edge_index
