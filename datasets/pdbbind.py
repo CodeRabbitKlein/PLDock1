@@ -125,6 +125,25 @@ class NoiseTransform(BaseTransform):
 
         if self.crop_beyond_cutoff is not None:
             crop_beyond(data, tr_sigma * 3 + self.crop_beyond_cutoff, self.all_atom)
+            nci_edge_type = ('ligand', 'nci_cand', 'receptor')
+            if (nci_edge_type in data.edge_types
+                    and hasattr(data['receptor'], "old_to_new")):
+                nci_edge = data[nci_edge_type]
+                if hasattr(nci_edge, "edge_index") and nci_edge.edge_index is not None:
+                    edge_index = nci_edge.edge_index
+                    edge_index, valid_edges = remap_edge_index(edge_index, data['receptor'].old_to_new)
+                    if valid_edges is not None:
+                        if hasattr(nci_edge, "edge_type_y") and nci_edge.edge_type_y is not None:
+                            nci_edge.edge_type_y = nci_edge.edge_type_y[valid_edges]
+                        if hasattr(nci_edge, "edge_dist_y") and nci_edge.edge_dist_y is not None:
+                            nci_edge.edge_dist_y = nci_edge.edge_dist_y[valid_edges]
+                    if edge_index.numel() == 0:
+                        edge_index = edge_index.new_empty((2, 0))
+                        if hasattr(nci_edge, "edge_type_y"):
+                            nci_edge.edge_type_y = None
+                        if hasattr(nci_edge, "edge_dist_y"):
+                            nci_edge.edge_dist_y = None
+                    nci_edge.edge_index = edge_index
         set_time(data, t, t_tr, t_rot, t_tor, 1, self.all_atom, device=None, include_miscellaneous_atoms=self.include_miscellaneous_atoms)
         if hasattr(data['receptor'], "old_to_new"):
             delattr(data['receptor'], "old_to_new")
