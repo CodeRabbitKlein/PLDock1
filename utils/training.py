@@ -311,7 +311,7 @@ def _focal_loss(logits, labels, alpha_none, alpha_pos, gamma):
 
 def _sanitize_nci_labels(logits, labels):
     num_classes = logits.size(1)
-    labels = labels.long()
+    labels = labels.to(logits.device).long()
     valid_mask = (labels >= 0) & (labels < num_classes)
     return labels, valid_mask
 
@@ -328,6 +328,47 @@ def _empty_nci_metrics(data_or_num_graphs, device, apply_mean):
         return zeros, zeros, zeros
     zeros = torch.zeros(num_graphs, dtype=torch.float, device=device)
     return zeros, zeros, zeros
+
+
+def _sanitize_nci_edges(data):
+    graphs = data if isinstance(data, (list, tuple)) else [data]
+    nci_edge_type = ('ligand', 'nci_cand', 'receptor')
+    for g in graphs:
+        if nci_edge_type not in g.edge_types:
+            continue
+        edge = g[nci_edge_type]
+        if not hasattr(edge, 'edge_index') or edge.edge_index is None:
+            continue
+        edge_index = edge.edge_index
+        if edge_index.numel() == 0:
+            continue
+        num_lig = g['ligand'].num_nodes
+        num_rec = g['receptor'].num_nodes
+        valid_mask = (
+            (edge_index[0] >= 0)
+            & (edge_index[0] < num_lig)
+            & (edge_index[1] >= 0)
+            & (edge_index[1] < num_rec)
+        )
+        if not torch.all(valid_mask):
+            edge_index = edge_index[:, valid_mask]
+            if hasattr(edge, 'edge_type_y') and edge.edge_type_y is not None:
+                if edge.edge_type_y.numel() == valid_mask.numel():
+                    edge.edge_type_y = edge.edge_type_y[valid_mask]
+                else:
+                    edge.edge_type_y = None
+            if hasattr(edge, 'edge_dist_y') and edge.edge_dist_y is not None:
+                if edge.edge_dist_y.numel() == valid_mask.numel():
+                    edge.edge_dist_y = edge.edge_dist_y[valid_mask]
+                else:
+                    edge.edge_dist_y = None
+        if edge_index.numel() == 0:
+            edge_index = edge_index.new_empty((2, 0))
+            if hasattr(edge, 'edge_type_y'):
+                edge.edge_type_y = None
+            if hasattr(edge, 'edge_dist_y'):
+                edge.edge_dist_y = None
+        edge.edge_index = edge_index
 
 
 def _unpack_model_outputs(outputs):
@@ -416,6 +457,7 @@ def train_epoch(model, loader, optimizer, device, t_to_sigma, loss_fn, ema_weigh
             continue
         optimizer.zero_grad()
 
+        _sanitize_nci_edges(data)
         debug_nci_batch(data)
 
         data = [d.to(device) for d in data] if device.type == 'cuda' else data
@@ -476,6 +518,7 @@ def test_epoch(model, loader, device, t_to_sigma, loss_fn, test_sigma_intervals=
 
     for data in tqdm(loader, total=len(loader)):
         try:
+            _sanitize_nci_edges(data)
             with torch.no_grad():
                 tr_pred, rot_pred, tor_pred, sidechain_pred, nci_logits = _unpack_model_outputs(model(data))
             loss_tuple = loss_fn(tr_pred, rot_pred, tor_pred, sidechain_pred, data=data, t_to_sigma=t_to_sigma,
