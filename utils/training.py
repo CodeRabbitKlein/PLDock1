@@ -311,7 +311,7 @@ def _focal_loss(logits, labels, alpha_none, alpha_pos, gamma):
 
 def _sanitize_nci_labels(logits, labels):
     num_classes = logits.size(1)
-    labels = labels.long()
+    labels = labels.to(logits.device).long()
     valid_mask = (labels >= 0) & (labels < num_classes)
     return labels, valid_mask
 
