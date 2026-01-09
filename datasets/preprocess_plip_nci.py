@@ -53,7 +53,7 @@ def get_receptor_positions(pdbbind_dir, pdb_id, protein_file="protein_processed"
         (str(chain), int(resnum), str(icode), str(resname))
         for chain, resnum, icode, resname in zip(res_chain_ids, resnums, icodes, resnames)
     ]
-    return res_pos, res_chain_ids, resnums, res_keys
+    return res_pos, res_chain_ids, chains, resnums, res_keys
 
 
 def preprocess_complex(
@@ -79,7 +79,7 @@ def preprocess_complex(
         report = json.load(f)
 
     lig_pos = get_ligand_positions(pdbbind_dir, pdb_id, ligand_file=ligand_file, remove_hs=remove_hs)
-    res_pos_full, res_chain_ids_full, resnums_full, res_keys_full = get_receptor_positions(
+    res_pos_full, res_chain_ids_full, chains_full, resnums_full, res_keys_full = get_receptor_positions(
         pdbbind_dir,
         pdb_id,
         protein_file=protein_file,
@@ -107,7 +107,18 @@ def preprocess_complex(
     res_pos_full = res_pos_full - protein_center
     lig_pos = lig_pos - protein_center
 
-    res_key_to_full_idx = {tuple(res_key): idx for idx, res_key in enumerate(res_keys_full)}
+    res_key_to_full_idx = {}
+    for idx, res_key in enumerate(res_keys_full):
+        res_key_to_full_idx.setdefault(tuple(res_key), idx)
+        if len(res_key) >= 3:
+            res_key_to_full_idx.setdefault(tuple(res_key[:3]), idx)
+        chain_only = str(chains_full[idx]) if chains_full is not None else None
+        if chain_only:
+            chain_key = (chain_only, res_key[1], res_key[2], res_key[3]) if len(res_key) >= 4 else None
+            if chain_key is not None:
+                res_key_to_full_idx.setdefault(chain_key, idx)
+            if len(res_key) >= 3:
+                res_key_to_full_idx.setdefault((chain_only, res_key[1], res_key[2]), idx)
     (
         pos_map,
         pos_dist,
