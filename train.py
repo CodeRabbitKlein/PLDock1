@@ -50,6 +50,13 @@ def train(args, model, optimizer, scheduler, ema_weights, train_loader, val_load
         print("Freezing some parameters until epoch {}".format(freeze_params))
 
     print("Starting training...")
+    nci_log_path = os.path.join("workdir", "nci_log.txt")
+    os.makedirs(os.path.dirname(nci_log_path), exist_ok=True)
+    if not os.path.exists(nci_log_path):
+        with open(nci_log_path, 'w', encoding='utf-8') as log_file:
+            log_file.write(
+                "epoch batch pre_pos pre_neg pre_valid post_pos post_neg post_valid\n"
+            )
     for epoch in range(args.n_epochs):
         if epoch % 5 == 0: print("Run name: ", args.run_name)
 
@@ -68,7 +75,17 @@ def train(args, model, optimizer, scheduler, ema_weights, train_loader, val_load
                                                                optimizer=optimizer)
 
         logs = {}
-        train_losses = train_epoch(model, train_loader, optimizer, device, t_to_sigma, loss_fn, ema_weights if epoch > freeze_params else None)
+        train_losses = train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            t_to_sigma,
+            loss_fn,
+            ema_weights if epoch > freeze_params else None,
+            nci_log_path=nci_log_path,
+            epoch_idx=epoch,
+        )
         print("Epoch {}: Training loss {:.4f}  tr {:.4f}   rot {:.4f}   tor {:.4f}   sc {:.4f}   nci {:.4f}  lr {:.4f}"
               .format(epoch, train_losses['loss'], train_losses['tr_loss'], train_losses['rot_loss'],
                       train_losses['tor_loss'], train_losses['sidechain_loss'], train_losses['nci_loss'],
