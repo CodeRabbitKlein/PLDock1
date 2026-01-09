@@ -1,4 +1,5 @@
 import math
+import os
 
 from e3nn import o3
 import torch
@@ -334,33 +335,53 @@ class CGModel(torch.nn.Module):
         nci_logits = None
         if ('ligand', 'nci_cand', 'receptor') in data.edge_types:
             cand_edge_index = data['ligand', 'nci_cand', 'receptor'].edge_index
+            num_lig = data['ligand'].num_nodes
             num_rec = rec_node_attr.size(0)
-            lr_keys = lr_edge_index[0] * num_rec + lr_edge_index[1]
-            cand_keys = cand_edge_index[0] * num_rec + cand_edge_index[1]
-            lr_sorted, lr_order = torch.sort(lr_keys)
-            if lr_sorted.numel() == 0:
-                valid = torch.zeros_like(cand_keys, dtype=torch.bool)
-                cand_pos = torch.zeros_like(cand_keys)
+            if cand_edge_index.numel() > 0:
+                valid_mask = (
+                    (cand_edge_index[0] >= 0)
+                    & (cand_edge_index[0] < num_lig)
+                    & (cand_edge_index[1] >= 0)
+                    & (cand_edge_index[1] < num_rec)
+                )
+                if not torch.all(valid_mask):
+                    if os.getenv("NCI_DEBUG", "").lower() in {"1", "true", "yes"}:
+                        bad_indices = (~valid_mask).nonzero(as_tuple=False).flatten().tolist()
+                        raise AssertionError(
+                            f"Invalid NCI cand_edge_index detected. bad_edges={bad_indices[:20]}"
+                        )
+                    cand_edge_index = None
+            if cand_edge_index is None or cand_edge_index.numel() == 0:
+                cand_edge_index = None
+            if cand_edge_index is None:
+                nci_logits = None
             else:
-                cand_pos = torch.searchsorted(lr_sorted, cand_keys)
-                in_bounds = cand_pos < lr_sorted.numel()
-                valid = in_bounds.clone()
-                valid[in_bounds] = lr_sorted[cand_pos[in_bounds]] == cand_keys[in_bounds]
+                lr_keys = lr_edge_index[0] * num_rec + lr_edge_index[1]
+                cand_keys = cand_edge_index[0] * num_rec + cand_edge_index[1]
+                lr_sorted, lr_order = torch.sort(lr_keys)
+                if lr_sorted.numel() == 0:
+                    valid = torch.zeros_like(cand_keys, dtype=torch.bool)
+                    cand_pos = torch.zeros_like(cand_keys)
+                else:
+                    cand_pos = torch.searchsorted(lr_sorted, cand_keys)
+                    in_bounds = cand_pos < lr_sorted.numel()
+                    valid = in_bounds.clone()
+                    valid[in_bounds] = lr_sorted[cand_pos[in_bounds]] == cand_keys[in_bounds]
 
-            rbf = torch.zeros((cand_edge_index.size(1), self.cross_distance_embed_dim), device=lig_node_attr.device)
-            if valid.any():
-                rbf[valid] = lr_edge_attr[lr_order[cand_pos[valid]], self.sigma_embed_dim:]
-            if (~valid).any():
-                cand_edge_vec = data['receptor'].pos[cand_edge_index[1]] - data['ligand'].pos[cand_edge_index[0]]
-                cand_edge_length = self.cross_distance_expansion(cand_edge_vec.norm(dim=-1))
-                rbf[~valid] = cand_edge_length[~valid]
+                rbf = torch.zeros((cand_edge_index.size(1), self.cross_distance_embed_dim), device=lig_node_attr.device)
+                if valid.any():
+                    rbf[valid] = lr_edge_attr[lr_order[cand_pos[valid]], self.sigma_embed_dim:]
+                if (~valid).any():
+                    cand_edge_vec = data['receptor'].pos[cand_edge_index[1]] - data['ligand'].pos[cand_edge_index[0]]
+                    cand_edge_length = self.cross_distance_expansion(cand_edge_vec.norm(dim=-1))
+                    rbf[~valid] = cand_edge_length[~valid]
 
-            nci_input = torch.cat([
-                lig_node_attr[cand_edge_index[0]],
-                rec_node_attr[cand_edge_index[1]],
-                rbf
-            ], dim=-1)
-            nci_logits = self.nci_head(nci_input)
+                nci_input = torch.cat([
+                    lig_node_attr[cand_edge_index[0]],
+                    rec_node_attr[cand_edge_index[1]],
+                    rbf
+                ], dim=-1)
+                nci_logits = self.nci_head(nci_input)
 
         lr_edge_attr = self.cross_edge_embedding(lr_edge_attr)
 
